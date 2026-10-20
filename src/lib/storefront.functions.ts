@@ -85,21 +85,14 @@ export const getStorefront = createServerFn({ method: "GET" })
     // by merchants.id. Use merchants.user_id everywhere below.
     const userId = String((merchant as any).user_id);
     const merchantId = String(merchant.id);
-    {
-      const { isStoreRestricted } = await import("@/lib/subscription.server");
-      if (await isStoreRestricted(admin, userId)) {
-        return {
-          found: true, restricted: true, slug: data.slug, userId: null, merchantId: null,
-          brandName: (merchant as any).brand_name ?? null,
-          brandDescription: null, logoUrl: null, themeKey: null,
-          sectionsConfig: null, products: [], policies: [], contacts: [], shipping: [],
-          paymentMethods: [],
-        };
-      }
-    }
-
-
-    const [pR, polR, cR, shR, imgR, colR] = await Promise.all([
+    // All reads below depend only on userId, so they run at the same time.
+    const { isStoreRestricted } = await import("@/lib/subscription.server");
+    const { loadOffers } = await import("@/lib/offers.server");
+    const { loadEnabledPaymentMethods } = await import("@/lib/merchant-data.server");
+    const [restricted, offersRes, pmRows, pR, polR, cR, shR, imgR, colR] = await Promise.all([
+      isStoreRestricted(admin, userId),
+      loadOffers(admin as any, userId),
+      loadEnabledPaymentMethods(admin as any, userId),
       admin.from("products")
         .select("id,name,description,category,price,currency,images,variants")
         .eq("user_id", userId).order("category").order("name"),
@@ -116,6 +109,15 @@ export const getStorefront = createServerFn({ method: "GET" })
         .eq("user_id", userId).order("position", { ascending: true }),
       admin.from("product_colors").select("id, label").eq("user_id", userId),
     ]);
+    if (restricted) {
+      return {
+        found: true, restricted: true, slug: data.slug, userId: null, merchantId: null,
+        brandName: (merchant as any).brand_name ?? null,
+        brandDescription: null, logoUrl: null, themeKey: null,
+        sectionsConfig: null, products: [], policies: [], contacts: [], shipping: [],
+        paymentMethods: [],
+      };
+    }
     const colorLabelById = new Map<string, string>();
     for (const c of colR.data ?? []) colorLabelById.set(String((c as any).id), String((c as any).label ?? ""));
     const pidToColorRaw = new Map<string, Array<[string, string]>>();
@@ -158,27 +160,29 @@ export const getStorefront = createServerFn({ method: "GET" })
       if (storagePaths.has(u)) savedPhotoPaths.add(u);
     }
     const legacyPaths = [...storagePaths].filter((u) => !savedPhotoPaths.has(u));
-    const signedByPath = legacyPaths.length
-      ? await createSignedUrlsBatch(legacyPaths, 60 * 60 * 24 * 7)
-      : new Map<string, string>();
+    const { fetchVariantsByProductIds } = await import("@/lib/product-variants.server");
+    // Image signing and variants are independent: fetch them together.
+    const [signedByPath, variantsByPid] = await Promise.all([
+      legacyPaths.length
+        ? createSignedUrlsBatch(legacyPaths, 60 * 60 * 24 * 7)
+        : Promise.resolve(new Map<string, string>()),
+      fetchVariantsByProductIds(
+        admin,
+        productRows.map((p: any) => String(p.id)),
+      ),
+    ]);
     for (const u of savedPhotoPaths) signedByPath.set(u, permanentProductImageUrl(u));
     const sign = (u: string): string | null =>
       /^https?:/i.test(u) || /^data:/i.test(u) ? u : signedByPath.get(u) ?? null;
 
     // Canonical variants come from product_variants; fall back to the legacy
     // products.variants jsonb only when no rows exist yet.
-    const { fetchVariantsByProductIds } = await import("@/lib/product-variants.server");
-    const variantsByPid = await fetchVariantsByProductIds(
-      admin,
-      productRows.map((p: any) => String(p.id)),
-    );
 
     // Live offers, read with the SAME rules the agent uses (active, inside the
     // window, not sold out). Display only — the price is still decided by the
     // server quote and recomputed at order creation.
-    const { loadOffers } = await import("@/lib/offers.server");
     const { remainingSeats, offerDisplayFields } = await import("@/lib/manual-order-offers.server");
-    const liveOffers = (await loadOffers(admin as any, userId)).live;
+    const liveOffers = offersRes.live;
     const offersFor = (productId: string) =>
       liveOffers
         .filter((o) => o.scope === "all" || String(o.product_id ?? "") === productId)
@@ -238,8 +242,6 @@ export const getStorefront = createServerFn({ method: "GET" })
     });
 
     // Enabled payment methods — same source the chat agent uses.
-    const { loadEnabledPaymentMethods } = await import("@/lib/merchant-data.server");
-    const pmRows = await loadEnabledPaymentMethods(admin as any, userId);
 
     return {
       found: true, slug: data.slug, userId, merchantId,
