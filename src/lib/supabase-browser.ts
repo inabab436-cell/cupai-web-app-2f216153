@@ -42,11 +42,30 @@ export function clearGoogleIntent() {
   sessionStorage.removeItem(INTENT_KEY);
 }
 
+/** True only when running on Lovable hosting, where the managed OAuth broker exists. */
+function isLovableHost() {
+  const h = window.location.hostname;
+  return h.endsWith(".lovable.app") || h.endsWith(".lovableproject.com") || h.endsWith(".lovable.dev");
+}
+
 /** Start the Google OAuth redirect flow. */
 export async function startGoogleSignIn(intent: GoogleIntent) {
   saveGoogleIntent(intent);
+  const redirectTo = `${window.location.origin}/auth/callback`;
+
+  if (!isLovableHost()) {
+    // Self-hosted (e.g. Vercel): use the project's own Google provider directly.
+    const supabase = await getBrowserSupabase();
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo, queryParams: { prompt: "select_account" } },
+    });
+    if (error) throw new Error(error.message);
+    return;
+  }
+
   const result = await lovable.auth.signInWithOAuth("google", {
-    redirect_uri: `${window.location.origin}/auth/callback`,
+    redirect_uri: redirectTo,
     extraParams: { prompt: "select_account" },
   });
   if (result.error) throw new Error(result.error.message);
