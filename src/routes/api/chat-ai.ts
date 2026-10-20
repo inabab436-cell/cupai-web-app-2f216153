@@ -866,13 +866,16 @@ export const Route = createFileRoute("/api/chat-ai")({
 
           const supabaseUrl = process.env.SUPABASE_URL;
           const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-          const lovableApiKey = process.env.LOVABLE_API_KEY;
+          // AI key is optional: chat must keep working (human replies, orders)
+          // even when no AI key exists or the agent is disabled.
+          const lovableApiKey =
+            process.env[process.env.CUPAI_APP_AI_KEY_ENV || "LOVABLE_API_KEY"] ?? "";
 
           if (!supabaseUrl || !serviceKey) {
             return jsonResponse({ error: "Supabase env vars not configured" }, 500);
           }
           if (!lovableApiKey) {
-            return jsonResponse({ error: "LOVABLE_API_KEY not configured" }, 500);
+            console.warn("[chat-ai] no AI key configured; AI replies will be skipped");
           }
 
           const body = (await request.json()) as RequestBody;
